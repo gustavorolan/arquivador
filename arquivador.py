@@ -29,7 +29,10 @@ def ler_protegidos():
 PROTEGIDOS_FIXOS = [HOME / ".claude", HOME / "AppData", ARQUIVO]
 RAIZES_SUGERIDAS = ["Documents", "Downloads", "dev", "Projects", "Videos", "Desktop", "OneDrive"]
 NOME_TAREFA = "Arquivador-Rotina"
+ATRIBUTO_OCULTO = 0x2
+SEGUNDOS_CONCLUIDO = 6
 TRAVA = threading.Lock()
+LIMITE_TAREFAS = threading.Semaphore(2)
 JOBS = {}
 
 
@@ -123,6 +126,24 @@ def remover(caminho):
 def atualizar(job, **campos):
     with TRAVA:
         job.update(campos)
+        if campos.get("ok") is not None:
+            job["fim"] = time.time()
+
+
+def jobs_visiveis():
+    agora = time.time()
+    with TRAVA:
+        return [
+            j for j in JOBS.values()
+            if j["ok"] is None or (j["ok"] is True and agora - j["fim"] < SEGUNDOS_CONCLUIDO) or (j["ok"] is False and not j.get("dispensado"))
+        ]
+
+
+def dispensar_falhas():
+    with TRAVA:
+        for job in JOBS.values():
+            if job["ok"] is False:
+                job["dispensado"] = True
 
 
 def escrever_zip(destino, arquivos, job):
@@ -153,7 +174,29 @@ def verificar_zip(destino, arquivos):
 def contar_arquivos(caminho):
     if os.path.isfile(lp(caminho)):
         return 1
-    return sum(len(f) for _, _, f in os.walk(lp(caminho)))
+    total = 0
+    for raiz, pastas, arquivos in os.walk(lp(caminho)):
+        pastas[:] = [p for p in pastas if not eh_link(os.path.join(raiz, p))]
+        total += sum(1 for nome in arquivos if not eh_link(os.path.join(raiz, nome)))
+    return total
+
+
+def listar_atalhos(caminho):
+    base = Path(caminho)
+    if base.is_file():
+        return []
+    achados = []
+    for raiz, pastas, arquivos in os.walk(lp(base)):
+        for nome in arquivos:
+            if eh_link(os.path.join(raiz, nome)):
+                raise RuntimeError("Ha arquivo-atalho (symlink) na pasta; nao e suportado, original mantido.")
+        for nome in list(pastas):
+            completo = os.path.join(raiz, nome)
+            if eh_link(completo):
+                pastas.remove(nome)
+                alvo = os.readlink(completo).replace("\\\\?\\", "")
+                achados.append({"rel": os.path.relpath(completo, lp(base)).replace("\\", "/"), "alvo": alvo})
+    return achados
 
 
 def criar_zip_verificado(caminho, job, exigir_completo):
@@ -171,10 +214,12 @@ def criar_zip_verificado(caminho, job, exigir_completo):
         existentes = contar_arquivos(caminho)
         if exigir_completo and existentes != quantidade:
             raise RuntimeError(f"Pasta tem {existentes} arquivos e o ZIP {quantidade}; original mantido.")
+        atalhos = listar_atalhos(caminho)
+        ocultos = listar_ocultos(caminho)
     except Exception:
         destino.unlink(missing_ok=True)
         raise
-    return {"carimbo": carimbo, "zip": str(destino), "bytes_originais": original, "bytes_zip": destino.stat().st_size, "arquivos": quantidade}
+    return {"carimbo": carimbo, "zip": str(destino), "bytes_originais": original, "bytes_zip": destino.stat().st_size, "arquivos": quantidade, "atalhos": atalhos, "ocultos": ocultos}
 
 
 def alterar_item(item_id, **campos):
@@ -208,6 +253,8 @@ def trabalho_compactar(job, caminho, apagar):
             "bytes_originais": info["bytes_originais"],
             "bytes_zip": info["bytes_zip"],
             "arquivos": info["arquivos"],
+            "atalhos": info["atalhos"],
+            "ocultos": info["ocultos"],
             "data": datetime.now().isoformat(timespec="seconds"),
             "aberto": not apagar,
         }
@@ -223,6 +270,50 @@ def trabalho_compactar(job, caminho, apagar):
         atualizar(job, fase="Falhou", erro=str(erro), ok=False)
 
 
+def listar_ocultos(caminho):
+    base = Path(caminho)
+    if base.is_file():
+        return []
+    achados = []
+    for raiz, pastas, arquivos in os.walk(lp(base)):
+        pastas[:] = [p for p in pastas if not eh_link(os.path.join(raiz, p))]
+        for nome in pastas + arquivos:
+            completo = os.path.join(raiz, nome)
+            try:
+                atributos = os.stat(completo).st_file_attributes
+            except OSError:
+                continue
+            if atributos & ATRIBUTO_OCULTO:
+                achados.append(os.path.relpath(completo, lp(base)).replace("\\", "/"))
+    return achados
+
+
+def aplicar_ocultos(destino, ocultos, nomes_no_zip):
+    import ctypes
+
+    marcar = {destino / rel for rel in ocultos}
+    for nome in nomes_no_zip:
+        partes = nome.rstrip("/").split("/")
+        for posicao, parte in enumerate(partes):
+            if parte == ".git":
+                marcar.add(destino.parent.joinpath(*partes[: posicao + 1]))
+    kernel = ctypes.windll.kernel32
+    for caminho in marcar:
+        atual = kernel.GetFileAttributesW(lp(caminho))
+        if atual != 0xFFFFFFFF:
+            kernel.SetFileAttributesW(lp(caminho), atual | ATRIBUTO_OCULTO)
+
+
+def recriar_atalhos(destino, atalhos):
+    import _winapi
+
+    for atalho in atalhos:
+        link = destino / atalho["rel"]
+        if not os.path.lexists(lp(link)) and os.path.isdir(lp(atalho["alvo"])):
+            link.parent.mkdir(parents=True, exist_ok=True)
+            _winapi.CreateJunction(atalho["alvo"], str(link))
+
+
 def trabalho_restaurar(job, item, manter_zip):
     try:
         destino = Path(item["origem"])
@@ -232,11 +323,14 @@ def trabalho_restaurar(job, item, manter_zip):
         destino.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(lp(item["zip"])) as zf:
             total = sum(i.file_size for i in zf.infolist())
+            nomes = [i.filename for i in zf.infolist()]
             feito = 0
             for info in zf.infolist():
                 zf.extract(info, lp(destino.parent))
                 feito += info.file_size
                 atualizar(job, feito=feito, total=total)
+        recriar_atalhos(destino, item.get("atalhos", []))
+        aplicar_ocultos(destino, item.get("ocultos", []), nomes)
         if manter_zip:
             alterar_item(item["id"], aberto=True)
         else:
@@ -258,7 +352,7 @@ def trabalho_fechar(job, item):
         info = criar_zip_verificado(pasta, job, True)
         alterar_item(
             item["id"], zip=info["zip"], bytes_originais=info["bytes_originais"], bytes_zip=info["bytes_zip"],
-            arquivos=info["arquivos"], data=datetime.now().isoformat(timespec="seconds"), aberto=False,
+            arquivos=info["arquivos"], atalhos=info["atalhos"], ocultos=info["ocultos"], data=datetime.now().isoformat(timespec="seconds"), aberto=False,
         )
         Path(item["zip"]).unlink(missing_ok=True)
         atualizar(job, fase="Apagando pasta de trabalho")
@@ -269,6 +363,11 @@ def trabalho_fechar(job, item):
 
 
 def excluir_item(item):
+    pasta = Path(item["origem"])
+    if item.get("aberto") and pasta.exists():
+        validar_caminho(str(pasta))
+        exigir_pasta_livre(pasta)
+        remover(pasta)
     Path(item["zip"]).unlink(missing_ok=True)
     with TRAVA:
         gravar_indice([i for i in ler_indice() if i["id"] != item["id"]])
@@ -330,11 +429,16 @@ def remover_rotina():
     return resultado.returncode
 
 
+def executar_limitado(alvo, job, args):
+    with LIMITE_TAREFAS:
+        alvo(job, *args)
+
+
 def iniciar(alvo, *args):
     job = novo_job(args[0])
     with TRAVA:
         JOBS[job["id"]] = job
-    threading.Thread(target=alvo, args=(job, *args), daemon=True).start()
+    threading.Thread(target=executar_limitado, args=(alvo, job, args), daemon=True).start()
     return job
 
 
@@ -380,9 +484,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-Token") != TOKEN:
             return self.responder(403, {"erro": "token"})
         if url.path == "/api/estado":
-            with TRAVA:
-                jobs = list(JOBS.values())
-            return self.responder(200, {"itens": ler_indice(), "jobs": jobs, "livre_gb": livre_gb(), "pasta": str(ARQUIVO), "raizes": RAIZES_SUGERIDAS})
+            return self.responder(200, {"itens": ler_indice(), "jobs": jobs_visiveis(), "livre_gb": livre_gb(), "pasta": str(ARQUIVO), "raizes": RAIZES_SUGERIDAS})
         if url.path == "/api/varrer":
             raiz = parse_qs(url.query).get("raiz", [""])[0]
             return self.responder(200, varrer(raiz) if raiz in RAIZES_SUGERIDAS else [])
@@ -396,6 +498,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/compactar":
                 caminho = validar_caminho(corpo["caminho"])
                 return self.responder(200, iniciar(trabalho_compactar, caminho, bool(corpo.get("apagar", True))))
+            if self.path == "/api/dispensar":
+                dispensar_falhas()
+                return self.responder(200, {"ok": True})
             item = next((i for i in ler_indice() if i["id"] == corpo.get("id")), None)
             if item is None:
                 raise ValueError("Item nao encontrado.")
@@ -413,7 +518,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/excluir":
                 excluir_item(item)
                 return self.responder(200, {"ok": True})
-        except (ValueError, KeyError) as erro:
+        except (ValueError, KeyError, RuntimeError, OSError) as erro:
             return self.responder(400, {"erro": str(erro)})
         self.responder(404, {"erro": "nao encontrado"})
 
@@ -446,16 +551,39 @@ def cli(argumentos):
         return instalar_rotina(horas)
     if comando == "remover-rotina":
         return remover_rotina()
-    if comando in ("restaurar", "abrir", "fechar"):
-        alvo = argumentos[1].lower()
-        achados = [i for i in indice if i["id"] == argumentos[1] or i["nome"].lower() == alvo]
-        if len(achados) != 1:
-            print("Nenhum item ou mais de um com esse nome; use o id de 'listar'.")
+    if comando == "excluir":
+        if "--confirmar" not in argumentos:
+            print("Excluir apaga o ZIP (e a pasta de trabalho, se estiver aberta) sem volta. Repita com --confirmar.")
             return 1
-        if comando == "fechar":
-            return esperar(iniciar(trabalho_fechar, achados[0]))
-        return esperar(iniciar(trabalho_restaurar, achados[0], comando == "abrir" or "--manter" in argumentos))
-    print("Uso: arquivador.py [listar | abrir <nome|id> | fechar <nome|id> | compactar <caminho> [--manter] | restaurar <nome|id> | rotina [--horas N] | instalar-rotina [--horas N] | remover-rotina]")
+        resultado = 0
+        for nome in [x for x in argumentos[1:] if not x.startswith("--")]:
+            achados = [i for i in indice if i["id"] == nome or i["nome"].lower() == nome.lower()]
+            if len(achados) != 1:
+                print(f"{nome}: nenhum item ou mais de um com esse nome; use o id de 'listar'.")
+                resultado = 1
+                continue
+            try:
+                excluir_item(achados[0])
+                print(f"{achados[0]['nome']}: excluido")
+            except (ValueError, RuntimeError, OSError) as erro:
+                print(f"{achados[0]['nome']}: {erro}")
+                resultado = 1
+        return resultado
+    if comando in ("restaurar", "abrir", "fechar"):
+        resultado = 0
+        for nome in [x for x in argumentos[1:] if not x.startswith("--")]:
+            achados = [i for i in indice if i["id"] == nome or i["nome"].lower() == nome.lower()]
+            if len(achados) != 1:
+                print(f"{nome}: nenhum item ou mais de um com esse nome; use o id de 'listar'.")
+                resultado = 1
+                continue
+            print(f"{achados[0]['nome']}: ", end="")
+            if comando == "fechar":
+                resultado |= esperar(iniciar(trabalho_fechar, achados[0]))
+            else:
+                resultado |= esperar(iniciar(trabalho_restaurar, achados[0], comando == "abrir" or "--manter" in argumentos))
+        return resultado
+    print("Uso: arquivador.py [listar | abrir <nome|id>... | fechar <nome|id>... | excluir <nome|id>... --confirmar | compactar <caminho> [--manter] | restaurar <nome|id> | rotina [--horas N] | instalar-rotina [--horas N] | remover-rotina]")
     return 1
 
 

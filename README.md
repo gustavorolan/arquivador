@@ -13,6 +13,10 @@ Feito para quem tem SSD pequeno ou PC antigo e não quer apagar projetos velhos.
 
 Um `indice.json` em `~/Arquivo` registra cada item.
 
+Na interface você pode **marcar várias pastas** e abrir todas juntas, trabalhar nelas e guardar todas de volta com um clique (no máximo 2 tarefas pesadas ao mesmo tempo). **Excluir** apaga o ZIP e, se a pasta estiver aberta, a pasta de trabalho, sempre com confirmação e sem volta.
+
+O ZIP guarda também pastas e arquivos ocultos (como `.git` e `.claude`), o atributo "oculto" do Windows e junctions (como as de workspaces do npm), que são recriados ao abrir. Symlinks de arquivo não são suportados: nesse caso o programa recusa e mantém o original.
+
 ## Requisitos
 
 - Windows 10 ou 11.
@@ -28,7 +32,7 @@ Um `indice.json` em `~/Arquivo` registra cada item.
 | Janela tkinter (reserva) | `pythonw arquivador_gui.pyw` |
 | Linha de comando | `python arquivador.py <comando>` |
 
-Comandos: `listar`, `abrir <nome|id>`, `fechar <nome|id>`, `compactar <caminho> [--manter]`, `restaurar <nome|id>`, `rotina [--horas N]`, `instalar-rotina [--horas N]`, `remover-rotina`.
+Comandos: `listar`, `abrir <nome|id>...`, `fechar <nome|id>...`, `excluir <nome|id>... --confirmar`, `compactar <caminho> [--manter]`, `restaurar <nome|id>`, `rotina [--horas N]`, `instalar-rotina [--horas N]`, `remover-rotina`. `abrir`, `fechar` e `excluir` aceitam vários nomes.
 
 A interface web escuta só em `127.0.0.1` e exige um token gerado a cada execução.
 

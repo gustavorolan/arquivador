@@ -38,6 +38,10 @@ input[type=text]{width:100%}
 .bar>i{display:block;height:100%;background:var(--ac);transition:width .3s}
 .ok{color:var(--ok)}.er{color:var(--er)}
 .vazio{color:var(--mut);padding:6px 0}
+.marca{width:18px;height:18px;flex:none;accent-color:var(--ac);cursor:pointer}
+.lote{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--chip);border-radius:10px;padding:10px 12px;margin:4px 0 8px}
+.lote[hidden]{display:none}
+.lote .qtd{font-weight:600;margin-right:4px}
 @media(max-width:640px){.item{flex-wrap:wrap}.acoes{justify-content:flex-start;width:100%}}
 </style>
 </head>
@@ -64,7 +68,16 @@ input[type=text]{width:100%}
 
 <section class="card">
 <h2>Arquivados <span class="mut" id="contagem"></span></h2>
-<input type="text" id="filtro" placeholder="Filtrar por nome" style="margin-bottom:6px">
+<input type="text" id="filtro" placeholder="Filtrar por nome" style="margin-bottom:8px">
+<div class="lote" id="lote" hidden>
+<span class="qtd" id="qtdMarcadas"></span>
+<button id="btnAbrirLote">Abrir marcadas</button>
+<button class="sec" id="btnPastasLote">Abrir pastas</button>
+<button id="btnGuardarLote">Guardar marcadas de volta</button>
+<button class="sec perigo" id="btnExcluirLote">Excluir marcadas</button>
+<button class="sec" id="btnLimparLote">Limpar seleção</button>
+<span class="er" id="msgLote"></span>
+</div>
 <div id="itens"></div>
 </section>
 </main>
@@ -75,6 +88,7 @@ const tam=b=>b>=1073741824?(b/1073741824).toFixed(2)+" GB":b>=1048576?(b/1048576
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const dataBr=iso=>iso.slice(8,10)+"/"+iso.slice(5,7)+"/"+iso.slice(0,4);
 let itensAtuais=[];
+const marcados=new Set();
 async function api(u,corpo){
  const r=await fetch(u,{method:corpo?"POST":"GET",headers:{"X-Token":T,"Content-Type":"application/json"},body:corpo?JSON.stringify(corpo):undefined});
  const j=await r.json();if(!r.ok)throw new Error(j.erro||r.status);return j}
@@ -82,13 +96,38 @@ function desenharItens(){
  const f=$("filtro").value.trim().toLowerCase();
  const lista=itensAtuais.filter(i=>i.nome.toLowerCase().includes(f)).slice().reverse();
  $("contagem").textContent="("+lista.length+")";
- $("itens").innerHTML=lista.map(i=>`<div class="item"><div class="info"><div class="nome">${esc(i.nome)}${i.aberto?'<span class="badge">ABERTO</span>':""}</div><div class="ori" title="${esc(i.origem)}">${esc(i.origem)}</div><div class="meta">${tam(i.bytes_originais)} → ${tam(i.bytes_zip)} · ${i.arquivos} ${i.arquivos===1?"arquivo":"arquivos"} ·${dataBr(i.data)}</div></div><div class="acoes">${i.aberto?`<button class="sec" data-e="${i.id}">Abrir pasta</button><button data-f="${i.id}">Guardar de volta</button>`:`<button data-a="${i.id}">Abrir</button><button class="sec perigo" data-x="${i.id}">Excluir ZIP</button>`}</div></div>`).join("")||'<div class="vazio">Nada arquivado.</div>'}
+ $("itens").innerHTML=lista.map(i=>`<div class="item"><input type="checkbox" class="marca" data-m="${i.id}" ${marcados.has(i.id)?"checked":""} aria-label="Marcar ${esc(i.nome)}"><div class="info"><div class="nome">${esc(i.nome)}${i.aberto?'<span class="badge">ABERTO</span>':""}</div><div class="ori" title="${esc(i.origem)}">${esc(i.origem)}</div><div class="meta">${tam(i.bytes_originais)} → ${tam(i.bytes_zip)} · ${i.arquivos} ${i.arquivos===1?"arquivo":"arquivos"} ·${dataBr(i.data)}</div></div><div class="acoes">${i.aberto?`<button class="sec" data-e="${i.id}">Abrir pasta</button><button data-f="${i.id}">Guardar de volta</button>`:`<button data-a="${i.id}">Abrir</button>`}<button class="sec perigo" data-x="${i.id}">Excluir</button></div></div>`).join("")||'<div class="vazio">Nada arquivado.</div>';desenharLote()}
+function textoExclusao(lista){
+ const abertos=lista.filter(i=>i.aberto),fechados=lista.filter(i=>!i.aberto);
+ const linhas=["EXCLUIR DEFINITIVAMENTE (sem lixeira e sem volta):",""];
+ if(fechados.length)linhas.push("Somente o ZIP: "+fechados.map(i=>i.nome).join(", "));
+ if(abertos.length)linhas.push("PASTA ABERTA (com as alteracoes de agora) e ZIP: "+abertos.map(i=>i.nome).join(", "));
+ return linhas.join("\n")}
+function desenharLote(){
+ const ids=new Set(itensAtuais.map(i=>i.id));
+ for(const id of [...marcados])if(!ids.has(id))marcados.delete(id);
+ const sel=itensAtuais.filter(i=>marcados.has(i.id));
+ const fechadas=sel.filter(i=>!i.aberto),abertas=sel.filter(i=>i.aberto);
+ $("lote").hidden=sel.length===0;
+ $("qtdMarcadas").textContent=sel.length+(sel.length===1?" marcada":" marcadas");
+ $("btnAbrirLote").textContent="Abrir marcadas ("+fechadas.length+")";
+ $("btnAbrirLote").disabled=!fechadas.length;
+ $("btnPastasLote").textContent="Abrir pastas ("+abertas.length+")";
+ $("btnPastasLote").disabled=!abertas.length;
+ $("btnGuardarLote").textContent="Guardar marcadas de volta ("+abertas.length+")";
+ $("btnGuardarLote").disabled=!abertas.length;
+ $("btnExcluirLote").textContent="Excluir marcadas ("+sel.length+")"}
+async function lote(rota,filtro,limpar){
+ $("msgLote").textContent="";
+ for(const i of itensAtuais.filter(x=>marcados.has(x.id)&&filtro(x))){
+  try{await api(rota,{id:i.id});if(limpar)marcados.delete(i.id)}catch(x){$("msgLote").textContent=i.nome+": "+x.message}}
+ estado()}
 function desenharJobs(jobs){
  const lista=jobs.slice().reverse().slice(0,6);
  $("jobs").innerHTML=lista.length?lista.map(j=>{
   const p=j.total?Math.round(j.feito/j.total*100):0;
   const cor=j.ok===true?"ok":j.ok===false?"er":"mut";
-  return `<div style="margin:8px 0"><div class="row"><b>${esc(j.nome)}</b><span class="${cor}">${esc(j.fase)}${j.erro?": "+esc(j.erro):""}${j.liberado?" · liberou "+tam(j.liberado):""}</span></div><div class="bar"><i style="width:${j.ok===true?100:p}%"></i></div></div>`}).join(""):"Nada em andamento."}
+  return `<div style="margin:8px 0"><div class="row"><b>${esc(j.nome)}</b><span class="${cor}">${esc(j.fase)}${j.erro?": "+esc(j.erro):""}${j.liberado?" · liberou "+tam(j.liberado):""}</span></div><div class="bar"><i style="width:${j.ok===true?100:p}%"></i></div></div>`}).join("")+(lista.some(j=>j.ok===false)?'<button class="sec" data-d="1">Dispensar erros</button>':""):"Nada em andamento."}
 async function estado(){
  const e=await api("/api/estado");
  $("topo").textContent="Livre no C: "+e.livre_gb+" GB · ZIPs em "+e.pasta;
@@ -103,15 +142,27 @@ $("btnVarrer").onclick=async()=>{
 document.addEventListener("click",async e=>{
  const b=e.target.closest("button");if(!b)return;
  if(b.dataset.c){$("caminho").value=b.dataset.c;$("caminho").focus();return}
+ if(b.dataset.d){await api("/api/dispensar",{});estado();return}
  try{
   for(const [k,rota] of [["a","/api/abrir"],["f","/api/fechar"],["e","/api/explorer"]]){if(b.dataset[k])await api(rota,{id:b.dataset[k]})}
-  if(b.dataset.x&&confirm("Excluir o ZIP definitivamente? Nao ha como desfazer."))await api("/api/excluir",{id:b.dataset.x})
+  if(b.dataset.x){const i=itensAtuais.find(x=>x.id===b.dataset.x);
+  if(i&&confirm(textoExclusao([i])))await api("/api/excluir",{id:i.id})}
  }catch(x){$("msg").textContent=x.message}
  estado()});
 $("btnCompactar").onclick=async()=>{
  $("msg").textContent="";
  try{await api("/api/compactar",{caminho:$("caminho").value.trim(),apagar:$("apagar").checked});$("caminho").value=""}catch(x){$("msg").textContent=x.message}
  estado()};
+$("btnAbrirLote").onclick=()=>lote("/api/abrir",i=>!i.aberto,false);
+$("btnPastasLote").onclick=()=>lote("/api/explorer",i=>i.aberto,false);
+$("btnGuardarLote").onclick=()=>lote("/api/fechar",i=>i.aberto,true);
+$("btnExcluirLote").onclick=()=>{
+ const sel=itensAtuais.filter(i=>marcados.has(i.id));
+ if(sel.length&&confirm(textoExclusao(sel)))lote("/api/excluir",()=>true,true)};
+$("btnLimparLote").onclick=()=>{marcados.clear();desenharItens()};
+document.addEventListener("change",e=>{
+ const id=e.target.dataset&&e.target.dataset.m;
+ if(id){if(e.target.checked)marcados.add(id);else marcados.delete(id);desenharLote()}});
 estado();setInterval(estado,1500);
 </script>
 </body>
