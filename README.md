@@ -42,10 +42,11 @@ Ele também só aceita caminhos dentro da sua pasta de usuário e ignora atalhos
 
 A página de [Releases](../../releases) traz um `Arquivador.exe` gerado com PyInstaller. Ele abre a interface no navegador padrão.
 
-Atenção:
+Assinatura e confiança:
 
-- O executável **não é assinado**. O Smart App Control do Windows e o SmartScreen podem bloqueá-lo. Nesse caso, use a versão em Python acima. Não desative as proteções do Windows por causa disto.
-- Confira o SHA-256 informado na release antes de executar.
+- O executável é assinado com um certificado **autoassinado** (`CN=Arquivador (autoassinado)`, arquivo `Arquivador.cer` na release). Isso garante que o arquivo não foi alterado depois de assinado, mas **o Windows não confia nele por padrão**, porque não vem de uma autoridade certificadora reconhecida.
+- Por isso o Smart App Control e o SmartScreen podem bloqueá-lo. Nesse caso, use a versão em Python acima. Não desative as proteções do Windows por causa disto.
+- Confira o SHA-256 e o thumbprint do certificado informados na release antes de executar.
 
 Para gerar você mesmo: `pip install pyinstaller` e rode `build.bat`.
 

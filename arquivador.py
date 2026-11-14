@@ -197,6 +197,8 @@ def exigir_pasta_livre(pasta):
 
 def trabalho_compactar(job, caminho, apagar):
     try:
+        if apagar:
+            exigir_pasta_livre(caminho)
         info = criar_zip_verificado(caminho, job, apagar)
         item = {
             "id": info["carimbo"] + "-" + secrets.token_hex(3),
